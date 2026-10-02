@@ -51,15 +51,6 @@ footer{margin-top:40px;color:var(--mute);font-size:13px}
   <label>Độ phân giải đầu ra
     <select id="res"><option value="720">720p – nhanh</option><option value="1080">1080p</option><option value="0" selected>Giữ nguyên gốc</option></select>
   </label>
-  <label>Khớp ánh sáng và màu da
-    <input type="range" id="cm" min="0" max="100" value="75">
-  </label>
-  <label>Độ mềm viền mặt
-    <input type="range" id="ft" min="0" max="100" value="40">
-  </label>
-  <label>Xử lý vật che mặt (tay, tóc, kính)
-    <input type="checkbox" id="oc" checked>
-  </label>
 </section>
 
 <button id="go" disabled>Đổi mặt</button>
@@ -168,10 +159,7 @@ $('go').onclick=async()=>{
     const chunks=[];rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
 
     let prev=null,done=false,spd=0;
-    const strength=()=>$('cm').value/100;
 
-    // Khớp ánh sáng cục bộ: nhân ảnh mặt với (màu video đã làm mờ / màu ảnh đã làm mờ).
-    // Giữ nguyên chi tiết da, nốt ruồi của ảnh gốc; chỉ đổi hướng sáng, bóng và tông màu.
     const sm=mk(8,8),tm=mk(8,8),b1=mk(8,8),b2=mk(8,8),gc=mk(8,8),up=mk(8,8),gp=new Float32Array(48*48*4),mb=mk(8,8),ON=mk(8,8),OA=mk(8,8);
     // Che khuất: khoét khỏi mặt nạ những vùng bị tóc / tay / vật thể (nhãn hair, body-skin, others) đè lên mặt, có làm mượt theo thời gian
     function occApply(occ,xs,ys){
@@ -188,23 +176,77 @@ $('go').onclick=async()=>{
       for(let i=0;i<2;i++)mx.drawImage(OA,0,0,W,H);
       mx.globalCompositeOperation='source-over';
     }
-    function colorMatch(bx,by,bw,bh,fw){
-      const sw=48,sh=48,bl=4,X={};
-      for(const [k,c] of Object.entries({sm,tm,b1,b2,gc})){c.width=sw;c.height=sh;X[k]=c.getContext('2d',{willReadFrequently:true});X[k].imageSmoothingQuality='high'}
-      X.sm.drawImage(wl,bx,by,bw,bh,0,0,sw,sh);
-      X.tm.drawImage(cv,bx,by,bw,bh,0,0,sw,sh);
-      X.tm.globalCompositeOperation='destination-in';X.tm.drawImage(sm,0,0);
-      X.b1.filter=`blur(${bl}px)`;X.b1.drawImage(sm,0,0);
-      X.b2.filter=`blur(${bl}px)`;X.b2.drawImage(tm,0,0);
-      const a=X.b1.getImageData(0,0,sw,sh).data,t=X.b2.getImageData(0,0,sw,sh).data,G=X.gc.createImageData(sw,sh),g=G.data;
-      for(let i=0;i<a.length;i+=4){
-        for(let c=0;c<3;c++){const v=a[i+3]<24?127.5:Math.min(255,Math.max(64,127.5*(t[i+c]+3)/(a[i+c]+3)));gp[i+c]=gp[i+c]?gp[i+c]*.5+v*.5:v;g[i+c]=gp[i+c]}
-        g[i+3]=255;
+    // ===== MÀU DA + ÁNH SÁNG TỰ ĐỘNG (không cần chỉnh tay) =====
+    // Mỗi frame: lấy vùng da hợp lệ của target (trán, má, mũi, cằm; loại mắt, mày, môi, tóc, vật che) -> LAB
+    // -> trường sáng/màu cục bộ của target và của ảnh nguồn -> chỉ sửa phần tần số thấp (ánh sáng, tông màu),
+    // giữ nguyên chi tiết da, mắt, mũi, miệng của ảnh nguồn. Kết quả được làm mượt theo thời gian.
+    const GN=48,N=GN*GN,cl=(v,a,b)=>Math.min(b,Math.max(a,v));
+    const LIN=new Float32Array(256).map((_,i)=>{const c=i/255;return c<=.04045?c/12.92:Math.pow((c+.055)/1.055,2.4)});
+    const ENC=new Uint8ClampedArray(4096).map((_,i)=>{const v=i/4095;return 255*(v<=.0031308?12.92*v:1.055*Math.pow(v,1/2.4)-.055)});
+    const fL=t=>t>.008856?Math.cbrt(t):7.787*t+16/116,fI=t=>t>.206897?t*t*t:(t-16/116)/7.787;
+    function lab(r,g,b,o){const R=LIN[r],G=LIN[g],B=LIN[b],x=fL((R*.4124564+G*.3575761+B*.1804375)/.95047),y=fL(R*.2126729+G*.7151522+B*.072175),z=fL((R*.0193339+G*.119192+B*.9503041)/1.08883);o[0]=116*y-16;o[1]=500*(x-y);o[2]=200*(y-z)}
+    function rgb(L,a,b,o){const y=(L+16)/116,X=fI(y+a/500)*.95047,Y=fI(y),Z=fI(y-b/200)*1.08883,e=v=>ENC[cl(Math.round(v*4095),0,4095)];
+      o[0]=e(3.2404542*X-1.5371385*Y-.4985314*Z);o[1]=e(-.969266*X+1.8760108*Y+.041556*Z);o[2]=e(.0556434*X-.2040259*Y+1.0572252*Z)}
+    function box(src,r){let a=src;for(let k=0;k<2;k++){const t=new Float32Array(N),o=new Float32Array(N);
+      for(let y=0;y<GN;y++)for(let x=0;x<GN;x++){let s=0;for(let d=-r;d<=r;d++){const xx=x+d;if(xx>=0&&xx<GN)s+=a[y*GN+xx]}t[y*GN+x]=s/(2*r+1)}
+      for(let y=0;y<GN;y++)for(let x=0;x<GN;x++){let s=0;for(let d=-r;d<=r;d++){const yy=y+d;if(yy>=0&&yy<GN)s+=t[yy*GN+x]}o[y*GN+x]=s/(2*r+1)}
+      a=o}return a}
+    const HOLES=[[33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246],[263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466],
+      [70,63,105,66,107,55,65,52,53,46],[300,293,334,296,336,285,295,282,283,276],[61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185]];
+    const KM=mk(GN,GN),st={d:null,gl:1,gc:1,m:null};
+    function colorMatch(bx,by,bw,bh,fw,dp){
+      const sx=GN/bw,sy=GN/bh,X={};
+      for(const [n,c] of Object.entries({sm,tm,KM})){c.width=GN;c.height=GN;X[n]=c.getContext('2d',{willReadFrequently:true});X[n].imageSmoothingQuality='high'}
+      X.sm.drawImage(wl,bx,by,bw,bh,0,0,GN,GN);X.tm.drawImage(cv,bx,by,bw,bh,0,0,GN,GN);
+      const m=p=>[(p[0]-bx)*sx,(p[1]-by)*sy],kc=X.KM,O=OVAL.map(i=>m(dp[i])),ox=O.reduce((t,p)=>t+p[0],0)/O.length,oy=O.reduce((t,p)=>t+p[1],0)/O.length;
+      kc.fillStyle='#fff';kc.beginPath();O.forEach((p,n)=>{const x=ox+(p[0]-ox)*.88,y=oy+(p[1]-oy)*.88;n?kc.lineTo(x,y):kc.moveTo(x,y)});kc.closePath();kc.fill();
+      kc.globalCompositeOperation='destination-out';kc.lineWidth=Math.max(1,fw*.05*sx);kc.lineJoin='round';
+      for(const L of HOLES){kc.beginPath();L.forEach((i,n)=>{const p=m(dp[i]);n?kc.lineTo(p[0],p[1]):kc.moveTo(p[0],p[1])});kc.closePath();kc.fill();kc.stroke()}
+      const S=X.sm.getImageData(0,0,GN,GN).data,T=X.tm.getImageData(0,0,GN,GN).data,K=X.KM.getImageData(0,0,GN,GN).data;
+      const ls=new Float32Array(N*3),lt=new Float32Array(N*3),o=[0,0,0],ok=[];
+      for(let i=0;i<N;i++){
+        lab(T[i*4],T[i*4+1],T[i*4+2],o);lt[i*3]=o[0];lt[i*3+1]=o[1];lt[i*3+2]=o[2];
+        lab(S[i*4],S[i*4+1],S[i*4+2],o);ls[i*3]=o[0];ls[i*3+1]=o[1];ls[i*3+2]=o[2];
+        if(K[i*4+3]>200&&S[i*4+3]>230)ok.push(i);
       }
-      X.gc.putImageData(G,0,0);
+      if(ok.length>=40){
+        const md=(A,c)=>{const v=ok.map(i=>A[i*3+c]).sort((a,b)=>a-b);return v[v.length>>1]};
+        const tA=md(lt,1),tB=md(lt,2),sA=md(ls,1),sB=md(ls,2),w=new Float32Array(N),good=[];
+        // loại điểm không phải da: quá tối (tóc, lông mi) hoặc lệch sắc độ so với da trung vị (râu, vật lạ); KHÔNG loại vùng bóng đổ
+        for(const i of ok)if(lt[i*3]>8&&ls[i*3]>8&&Math.hypot(lt[i*3+1]-tA,lt[i*3+2]-tB)<14&&Math.hypot(ls[i*3+1]-sA,ls[i*3+2]-sB)<14){w[i]=1;good.push(i)}
+        if(good.length>=30){
+          const n=good.length,mT=[0,0,0],mS=[0,0,0],wb=box(w,5),nd=new Float32Array(N*3);
+          for(const i of good)for(let c=0;c<3;c++){mT[c]+=lt[i*3+c]/n;mS[c]+=ls[i*3+c]/n}
+          for(let c=0;c<3;c++){
+            const fa=new Float32Array(N),fb=new Float32Array(N);
+            for(let i=0;i<N;i++){fa[i]=w[i]*lt[i*3+c];fb[i]=w[i]*ls[i*3+c]}
+            const ft=box(fa,5),fs=box(fb,5);
+            for(let i=0;i<N;i++)nd[i*3+c]=wb[i]>.05?(ft[i]-fs[i])/wb[i]:mT[c]-mS[c];
+          }
+          const sd=(A,c,d)=>{let s=0,q=0;for(const i of good){const v=A[i*3+c]+(d?nd[i*3+c]:0);s+=v;q+=v*v}const u=s/n;return Math.sqrt(Math.max(q/n-u*u,1))};
+          const gl=cl(sd(lt,0,0)/sd(ls,0,1),.9,1.1),gcc=cl((sd(lt,1,0)+sd(lt,2,0))/(sd(ls,1,1)+sd(ls,2,1)),.85,1.15);
+          if(st.d){ // làm mượt thích ứng: ánh sáng đổi nhanh thì bám nhanh, ổn định thì mượt
+            let ch=0;for(let i=0;i<N;i++)ch+=Math.abs(nd[i*3]-st.d[i*3]);ch/=N;
+            const a=ch>8?.85:ch>3?.6:.4;
+            for(let i=0;i<N*3;i++)nd[i]=st.d[i]+(nd[i]-st.d[i])*a;
+            st.gl+=(gl-st.gl)*a;st.gc+=(gcc-st.gc)*a;for(let c=0;c<3;c++)st.m[c]+=(mT[c]-st.m[c])*a;
+          }else{st.gl=gl;st.gc=gcc;st.m=mT}
+          st.d=nd;
+        }
+      }
+      if(!st.d)return;
+      // phóng trường hiệu chỉnh lên kích thước thật rồi áp từng điểm ảnh trong LAB
+      gc.width=GN;gc.height=GN;const gx=gc.getContext('2d'),G=gx.createImageData(GN,GN),d=st.d;
+      for(let i=0;i<N;i++){G.data[i*4]=127.5+cl(d[i*3],-60,60)*2.125;G.data[i*4+1]=127.5+cl(d[i*3+1],-40,40)*3.1875;G.data[i*4+2]=127.5+cl(d[i*3+2],-40,40)*3.1875;G.data[i*4+3]=255}
+      gx.putImageData(G,0,0);
       up.width=bw;up.height=bh;const ux=up.getContext('2d',{willReadFrequently:true});ux.imageSmoothingQuality='high';ux.drawImage(gc,0,0,bw,bh);
-      const U=ux.getImageData(0,0,bw,bh).data,F=wx.getImageData(bx,by,bw,bh),w=F.data,s=strength();
-      for(let i=0;i<w.length;i+=4){if(!w[i+3])continue;for(let c=0;c<3;c++)w[i+c]*=1+(U[i+c]/127.5-1)*s}
+      const U=ux.getImageData(0,0,bw,bh).data,F=wx.getImageData(bx,by,bw,bh),f=F.data,q=[0,0,0],r=[0,0,0],M=st.m;
+      for(let i=0;i<f.length;i+=4){
+        if(!f[i+3])continue;
+        lab(f[i],f[i+1],f[i+2],q);
+        rgb(M[0]+(q[0]+(U[i]-127.5)/2.125-M[0])*st.gl,M[1]+(q[1]+(U[i+1]-127.5)/3.1875-M[1])*st.gc,M[2]+(q[2]+(U[i+2]-127.5)/3.1875-M[2])*st.gc,r);
+        f[i]=r[0];f[i+1]=r[1];f[i+2]=r[2];
+      }
       wx.putImageData(F,bx,by);
     }
 
@@ -226,26 +268,27 @@ $('go').onclick=async()=>{
         if(x1>x0&&y1>y0)wx.drawImage(sc,x0,y0,x1-x0,y1-y0,x0,y0,x1-x0,y1-y0);
         wx.restore();
       }
-      // 2. Mặt nạ mềm theo viền mặt; khoét phần trong miệng khi há miệng để giữ răng/lưỡi của video
-      const xs=dp.map(p=>p[0]),ys=dp.map(p=>p[1]);
-      const fw=Math.max(...xs)-Math.min(...xs),blur=1+fw*.06*$('ft').value/100;
-      const ov=OVAL.map(i=>dp[i]),cxm=ov.reduce((t,p)=>t+p[0],0)/ov.length,cym=ov.reduce((t,p)=>t+p[1],0)/ov.length;
-      mx.clearRect(0,0,W,H);mx.filter=`blur(${blur}px)`;mx.fillStyle='#fff';
-      const fh=dist(dp[10],dp[152]),yw=(dist(dp[1],dp[234])-dist(dp[1],dp[454]))/(dist(dp[234],dp[454])||1);
-      poly(mx,ov.map(p=>{let f=p[1]>cym+fh*.1?.93:.96;if(yw>.12?p[0]<cxm:yw<-.12&&p[0]>cxm)f-=Math.min(.1,Math.abs(yw)*.25);return [cxm+(p[0]-cxm)*f,cym+(p[1]-cym)*f]}));
-      if(dist(dp[13],dp[14])/dist(dp[10],dp[152])>.03){
-        mx.globalCompositeOperation='destination-out';poly(mx,MOUTH.map(i=>dp[i]));mx.globalCompositeOperation='source-over';
-      }
-      if(seg&&$('oc').checked)occApply(occ,xs,ys);
-      mx.filter='none';
-      wx.globalCompositeOperation='destination-in';wx.drawImage(mc,0,0);wx.globalCompositeOperation='source-over';
-      // 3. Khớp màu da rồi dán lên frame
-      const pad=Math.ceil(blur*2)+2;
+      // 2. Biên mặt tự thích nghi: độ mềm suy ra từ kích thước mặt và tốc độ chuyển động; hàm/cằm nhọn, má vừa, trán mềm hơn (chuyển sang tóc)
+      const xs=dp.map(p=>p[0]),ys=dp.map(p=>p[1]),fw=Math.max(...xs)-Math.min(...xs),fh=dist(dp[10],dp[152]);
+      const mr=Math.min(10,Math.max(0,(spd*.5-1.5)*.45)),s0=Math.max(.8,fw*.008)+mr*.5,pad=Math.ceil(s0*6)+4;
       const bx=Math.max(0,Math.floor(Math.min(...xs))-pad),by=Math.max(0,Math.floor(Math.min(...ys))-pad);
       const bw=Math.min(W,Math.ceil(Math.max(...xs))+pad)-bx,bh=Math.min(H,Math.ceil(Math.max(...ys))+pad)-by;
-      const mr=Math.min(10,Math.max(0,(spd*.5-1.5)*.45));
-      if(mr>.4&&bw>4&&bh>4){mb.width=bw;mb.height=bh;const q=mb.getContext('2d');q.filter=`blur(${mr}px)`;q.drawImage(wl,bx,by,bw,bh,0,0,bw,bh);wx.clearRect(bx,by,bw,bh);wx.drawImage(mb,bx,by)}
-      if(bw>4&&bh>4&&strength()>0)colorMatch(bx,by,bw,bh,fw);
+      if(bw<8||bh<8)return;
+      if(mr>.4){mb.width=bw;mb.height=bh;const q=mb.getContext('2d');q.filter=`blur(${mr}px)`;q.drawImage(wl,bx,by,bw,bh,0,0,bw,bh);wx.clearRect(bx,by,bw,bh);wx.drawImage(mb,bx,by)}
+      const ov=OVAL.map(i=>dp[i]),cxm=ov.reduce((t,p)=>t+p[0],0)/ov.length,cym=ov.reduce((t,p)=>t+p[1],0)/ov.length;
+      const yw=(dist(dp[1],dp[234])-dist(dp[1],dp[454]))/(dist(dp[234],dp[454])||1);
+      const pts=ov.map(p=>{const t=(p[1]-cym)/(fh/2);let f=t>.5?.965:t<-.6?.95:.97;if(yw>.12?p[0]<cxm:yw<-.12&&p[0]>cxm)f-=Math.min(.1,Math.abs(yw)*.25);return [cxm+(p[0]-cxm)*f,cym+(p[1]-cym)*f]});
+      mx.clearRect(0,0,W,H);mx.fillStyle='#fff';
+      for(const [y0,y1,sg] of [[0,cym-fh*.3,s0*2],[cym-fh*.3,cym+fh*.1,s0*1.3],[cym+fh*.1,H,s0]]){
+        mx.save();mx.beginPath();mx.rect(0,y0,W,Math.max(0,y1-y0));mx.clip();mx.filter=`blur(${sg}px)`;poly(mx,pts);mx.restore();
+      }
+      mx.filter=`blur(${s0}px)`;
+      if(dist(dp[13],dp[14])/fh>.03){mx.globalCompositeOperation='destination-out';poly(mx,MOUTH.map(i=>dp[i]));mx.globalCompositeOperation='source-over'}
+      if(seg)occApply(occ,xs,ys);
+      mx.filter='none';
+      wx.setTransform(1,0,0,1,0,0);wx.globalCompositeOperation='destination-in';wx.drawImage(mc,0,0);wx.globalCompositeOperation='source-over';
+      // 3. Khớp màu da + ánh sáng tự động rồi dán lên frame
+      colorMatch(bx,by,bw,bh,fw,dp);
       cx.drawImage(wl,0,0);
     }
 
@@ -256,7 +299,7 @@ $('go').onclick=async()=>{
       const r=lm.detectForVideo(dc,lastTs);
       if(!r.faceLandmarks.length){prev=null;return}
       let occ=null;
-      if(seg&&$('oc').checked)try{seg.segmentForVideo(dc,lastTs,o=>{const m=o.categoryMask;occ={d:m.getAsUint8Array().slice(),w:m.width,h:m.height}})}catch(e){seg=null}
+      if(seg)try{seg.segmentForVideo(dc,lastTs,o=>{const m=o.categoryMask;occ={d:m.getAsUint8Array().slice(),w:m.width,h:m.height}})}catch(e){seg=null}
       const cur=r.faceLandmarks[0].map(p=>[p.x*W,p.y*H]);
       if(prev){
         const fw=dist(cur[454],cur[234])||1,mv=cur.reduce((t,p,i)=>t+dist(p,prev[i]),0)/cur.length/fw,a=Math.min(1,.3+mv*25);
