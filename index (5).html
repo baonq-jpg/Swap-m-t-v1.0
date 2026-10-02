@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Đổi mặt video miễn phí – chạy ngay trên trình duyệt</title>
+<meta name="description" content="Ghép mặt từ ảnh vào video từng frame, bám theo biểu cảm của video gốc. Miễn phí, không cần cài đặt, video không bị tải lên server.">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;700;800&display=swap">
+<style>
+:root{--bg:#eef1f6;--ink:#161a22;--mute:#5d6676;--card:#fff;--line:#cfd6e3;--ac:#2f5bff;--bad:#c62828;--ok:#0e8a5f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Be Vietnam Pro",system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:40px 20px 64px}
+h1{font-size:clamp(34px,6vw,56px);line-height:1.05;font-weight:800;letter-spacing:-.03em;margin:0 0 12px}
+.sub{color:var(--mute);max-width:56ch;margin:0 0 28px}
+.grid{display:grid;grid-template-columns:1.4fr 1fr;gap:14px}
+.drop{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:230px;background:var(--card);border:2px dashed var(--line);border-radius:14px;cursor:pointer;overflow:hidden;text-align:center;padding:16px}
+.drop:hover,.drop:focus-within{border-color:var(--ac)}
+.drop b{font-size:18px}.drop small{color:var(--mute)}
+.drop video,.drop img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none}
+.drop.has video,.drop.has img{display:block}
+.drop.has b,.drop.has small{position:relative;z-index:1;background:rgba(22,26,34,.75);color:#fff;padding:2px 10px;border-radius:6px}
+.drop.has{border-style:solid;border-color:var(--ac)}
+.opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin:18px 0}
+.opts label{display:flex;flex-direction:column;gap:6px;font-size:14px;color:var(--mute)}
+.opts select,.opts input{width:100%;font:inherit;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.opts input[type=range]{padding:0;accent-color:var(--ac)}
+button,.btn{display:inline-block;font:700 17px "Be Vietnam Pro",sans-serif;background:var(--ac);color:#fff;border:0;border-radius:10px;padding:14px 30px;cursor:pointer;text-decoration:none}
+button:disabled{background:#a9b3c8;cursor:not-allowed}
+button:focus-visible,.btn:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+#st{margin:16px 0 8px;color:var(--mute);min-height:1.5em}#st.err{color:var(--bad)}#st.ok{color:var(--ok)}
+.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--ac)}
+canvas,#rv{display:block;width:100%;max-height:70vh;margin-top:18px;background:#000;border-radius:12px;object-fit:contain}
+#out{margin-top:6px}#out .btn{margin-top:14px}
+footer{margin-top:40px;color:var(--mute);font-size:13px}
+@media(max-width:640px){.grid{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:no-preference){.bar i{transition:width .3s}}
+</style>
+</head>
+<body>
+<main>
+<h1>Đổi mặt video</h1>
+<p class="sub">Chọn video, chọn ảnh mặt rồi bấm đổi. Toàn bộ xử lý diễn ra trong trình duyệt của bạn, video và ảnh không bị tải lên đâu cả.</p>
+
+<section class="grid">
+  <label class="drop" id="dv"><input type="file" id="fv" accept="video/*" hidden><video id="pv" muted playsinline preload="metadata"></video><b>Chọn video</b><small>MP4, MOV, WebM – nên dưới 60 giây</small></label>
+  <label class="drop" id="di"><input type="file" id="fi" accept="image/*" hidden><img id="pi" alt="Ảnh mặt đã chọn"><b>Chọn ảnh mặt</b><small>Chụp rõ mặt, nhìn thẳng</small></label>
+</section>
+
+<section class="opts">
+  <label>Độ phân giải đầu ra
+    <select id="res"><option value="720">720p – nhanh</option><option value="1080">1080p</option><option value="0" selected>Giữ nguyên gốc</option></select>
+  </label>
+  <label>Khớp ánh sáng và màu da
+    <input type="range" id="cm" min="0" max="100" value="75">
+  </label>
+  <label>Độ mềm viền mặt
+    <input type="range" id="ft" min="0" max="100" value="40">
+  </label>
+</section>
+
+<button id="go" disabled>Đổi mặt</button>
+<p id="st" role="status">Đang tải AI nhận diện mặt…</p>
+<div class="bar"><i id="bar"></i></div>
+<canvas id="cv" hidden></canvas>
+
+<section id="out" hidden>
+  <video id="rv" controls playsinline></video>
+  <a id="dl" class="btn">Tải video</a>
+</section>
+
+<footer>Dùng Chrome hoặc Edge trên máy tính để có kết quả tốt nhất. Giữ tab ở phía trước trong lúc xử lý. Chỉ dùng ảnh của người đã đồng ý.</footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/delaunator@5.0.1/delaunator.min.js"></script>
+<script type="module">
+import {FaceLandmarker,FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $=id=>document.getElementById(id);
+const OVAL=[10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+const MOUTH=[78,95,88,178,87,14,317,402,318,324,308,415,310,311,312,13,82,81,80,191];
+let lm, videoFile, srcC, srcPts, tris, busy=false, lastTs=0;
+
+const status=(t,c='')=>{$('st').textContent=t;$('st').className=c};
+const update=()=>{
+  $('go').disabled=!(lm&&videoFile&&srcPts&&!busy);
+  $('fv').disabled=$('fi').disabled=busy;
+};
+
+// ---------- Tải model nhận diện mặt (MediaPipe, miễn phí) ----------
+const ready=(async()=>{
+  const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const make=d=>FaceLandmarker.createFromOptions(fs,{
+    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate:d},
+    runningMode:"IMAGE",numFaces:1});
+  try{lm=await make("GPU")}catch(e){lm=await make("CPU")}
+  status("Sẵn sàng. Hãy chọn video và ảnh mặt.");update();
+})().catch(()=>status("Không tải được model AI. Kiểm tra mạng rồi tải lại trang.","err"));
+
+// ---------- Chọn file ----------
+$('fv').onchange=e=>{
+  const f=e.target.files[0];if(!f)return;
+  videoFile=f;$('pv').src=URL.createObjectURL(f);$('dv').classList.add('has');
+  $('dv').querySelector('b').textContent=f.name;update();
+};
+$('fi').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  srcPts=null;update();
+  $('pi').src=URL.createObjectURL(f);$('di').classList.add('has');$('di').querySelector('b').textContent='Ảnh mặt';
+  await ready;if(!lm)return;
+  const bmp=await createImageBitmap(f,{imageOrientation:'from-image'});
+  const k=Math.min(1,2048/Math.max(bmp.width,bmp.height));
+  srcC=document.createElement('canvas');srcC.width=Math.round(bmp.width*k);srcC.height=Math.round(bmp.height*k);
+  srcC.getContext('2d').drawImage(bmp,0,0,srcC.width,srcC.height);
+  await lm.setOptions({runningMode:'IMAGE'});
+  const r=lm.detect(srcC);
+  if(!r.faceLandmarks.length){status("Không tìm thấy mặt trong ảnh. Hãy dùng ảnh chụp rõ mặt, nhìn thẳng.","err");return}
+  srcPts=r.faceLandmarks[0].slice(0,468).map(p=>[p.x*srcC.width,p.y*srcC.height]);
+  const d=new Delaunator(Float64Array.from(srcPts.flat())).triangles;
+  tris=[];for(let i=0;i<d.length;i+=3)tris.push([d[i],d[i+1],d[i+2]]);
+  status("Đã nhận diện mặt trong ảnh.","ok");update();
+};
+
+// ---------- Hình học ----------
+function affine(s,d){
+  const [x0,y0]=s[0],[x1,y1]=s[1],[x2,y2]=s[2],[u0,v0]=d[0],[u1,v1]=d[1],[u2,v2]=d[2];
+  const den=x0*(y1-y2)+x1*(y2-y0)+x2*(y0-y1);
+  if(Math.abs(den)<1e-6)return null;
+  return [
+    (u0*(y1-y2)+u1*(y2-y0)+u2*(y0-y1))/den,(v0*(y1-y2)+v1*(y2-y0)+v2*(y0-y1))/den,
+    (u0*(x2-x1)+u1*(x0-x2)+u2*(x1-x0))/den,(v0*(x2-x1)+v1*(x0-x2)+v2*(x1-x0))/den,
+    (u0*(x1*y2-x2*y1)+u1*(x2*y0-x0*y2)+u2*(x0*y1-x1*y0))/den,(v0*(x1*y2-x2*y1)+v1*(x2*y0-x0*y2)+v2*(x0*y1-x1*y0))/den];
+}
+const dist=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
+function poly(c,pts){c.beginPath();pts.forEach((p,i)=>i?c.lineTo(p[0],p[1]):c.moveTo(p[0],p[1]));c.closePath();c.fill()}
+
+// ---------- Xử lý video ----------
+$('go').onclick=async()=>{
+  busy=true;update();$('out').hidden=true;$('bar').style.width='0';
+  let ac;
+  try{
+    const v=document.createElement('video');v.playsInline=true;v.src=URL.createObjectURL(videoFile);
+    await new Promise((ok,no)=>{v.onloadedmetadata=ok;v.onerror=no});
+    let W=v.videoWidth,H=v.videoHeight;const lim=+$('res').value;
+    if(lim){const k=Math.min(1,lim/Math.min(W,H));W*=k;H*=k}
+    W=Math.round(W/2)*2;H=Math.round(H/2)*2;
+
+    const cv=$('cv');cv.hidden=false;cv.width=W;cv.height=H;
+    const cx=cv.getContext('2d');
+    const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
+    const wl=mk(W,H),wx=wl.getContext('2d'),mc=mk(W,H),mx=mc.getContext('2d');
+    wx.imageSmoothingQuality='high';
+    const dk=Math.min(1,960/Math.max(W,H)),dc=mk(Math.round(W*dk),Math.round(H*dk)),dx=dc.getContext('2d');
+    await lm.setOptions({runningMode:'VIDEO'});
+
+    ac=new AudioContext();await ac.resume();
+    const ad=ac.createMediaStreamDestination();ac.createMediaElementSource(v).connect(ad);
+    const stream=cv.captureStream(30);ad.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
+    const mime=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m))||'';
+    const rec=new MediaRecorder(stream,{mimeType:mime||undefined,videoBitsPerSecond:Math.min(4e7,Math.max(6e6,W*H*4.5))});
+    const chunks=[];rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+
+    let prev=null,done=false;
+    const strength=()=>$('cm').value/100;
+
+    // Khớp ánh sáng cục bộ: nhân ảnh mặt với (màu video đã làm mờ / màu ảnh đã làm mờ).
+    // Giữ nguyên chi tiết da, nốt ruồi của ảnh gốc; chỉ đổi hướng sáng, bóng và tông màu.
+    const sm=mk(8,8),tm=mk(8,8),b1=mk(8,8),b2=mk(8,8),gc=mk(8,8),up=mk(8,8);
+    function colorMatch(bx,by,bw,bh,fw){
+      const ds=Math.max(2,Math.round(fw/48)),sw=Math.max(8,Math.ceil(bw/ds)),sh=Math.max(8,Math.ceil(bh/ds)),bl=Math.max(1.5,fw/ds*.09),X={};
+      for(const [k,c] of Object.entries({sm,tm,b1,b2,gc})){c.width=sw;c.height=sh;X[k]=c.getContext('2d',{willReadFrequently:true});X[k].imageSmoothingQuality='high'}
+      X.sm.drawImage(wl,bx,by,bw,bh,0,0,sw,sh);
+      X.tm.drawImage(cv,bx,by,bw,bh,0,0,sw,sh);
+      X.tm.globalCompositeOperation='destination-in';X.tm.drawImage(sm,0,0);
+      X.b1.filter=`blur(${bl}px)`;X.b1.drawImage(sm,0,0);
+      X.b2.filter=`blur(${bl}px)`;X.b2.drawImage(tm,0,0);
+      const a=X.b1.getImageData(0,0,sw,sh).data,t=X.b2.getImageData(0,0,sw,sh).data,G=X.gc.createImageData(sw,sh),g=G.data;
+      for(let i=0;i<a.length;i+=4){
+        for(let c=0;c<3;c++)g[i+c]=a[i+3]<24?127.5:Math.min(255,Math.max(64,127.5*(t[i+c]+3)/(a[i+c]+3)));
+        g[i+3]=255;
+      }
+      X.gc.putImageData(G,0,0);
+      up.width=bw;up.height=bh;const ux=up.getContext('2d',{willReadFrequently:true});ux.imageSmoothingQuality='high';ux.drawImage(gc,0,0,bw,bh);
+      const U=ux.getImageData(0,0,bw,bh).data,F=wx.getImageData(bx,by,bw,bh),w=F.data,s=strength();
+      for(let i=0;i<w.length;i+=4){if(!w[i+3])continue;for(let c=0;c<3;c++)w[i+c]*=1+(U[i+c]/127.5-1)*s}
+      wx.putImageData(F,bx,by);
+    }
+
+    function swap(dp){
+      // 1. Warp từng tam giác của ảnh nguồn sang vị trí mặt trong frame
+      wx.setTransform(1,0,0,1,0,0);wx.clearRect(0,0,W,H);
+      for(const [i,j,k] of tris){
+        const s=[srcPts[i],srcPts[j],srcPts[k]],d=[dp[i],dp[j],dp[k]],m=affine(s,d);
+        if(!m)continue;
+        const gx=(d[0][0]+d[1][0]+d[2][0])/3,gy=(d[0][1]+d[1][1]+d[2][1])/3;
+        wx.save();wx.beginPath();
+        d.forEach((p,n)=>{const dx=p[0]-gx,dy=p[1]-gy,l=Math.hypot(dx,dy)||1,x=p[0]+dx/l*.7,y=p[1]+dy/l*.7;n?wx.lineTo(x,y):wx.moveTo(x,y)});
+        wx.closePath();wx.clip();wx.setTransform(...m);
+        const x0=Math.max(0,Math.floor(Math.min(s[0][0],s[1][0],s[2][0]))-2),y0=Math.max(0,Math.floor(Math.min(s[0][1],s[1][1],s[2][1]))-2);
+        const x1=Math.min(srcC.width,Math.ceil(Math.max(s[0][0],s[1][0],s[2][0]))+2),y1=Math.min(srcC.height,Math.ceil(Math.max(s[0][1],s[1][1],s[2][1]))+2);
+        if(x1>x0&&y1>y0)wx.drawImage(srcC,x0,y0,x1-x0,y1-y0,x0,y0,x1-x0,y1-y0);
+        wx.restore();
+      }
+      // 2. Mặt nạ mềm theo viền mặt; khoét phần trong miệng khi há miệng để giữ răng/lưỡi của video
+      const xs=dp.map(p=>p[0]),ys=dp.map(p=>p[1]);
+      const fw=Math.max(...xs)-Math.min(...xs),blur=1+fw*.06*$('ft').value/100;
+      const ov=OVAL.map(i=>dp[i]),cxm=ov.reduce((t,p)=>t+p[0],0)/ov.length,cym=ov.reduce((t,p)=>t+p[1],0)/ov.length;
+      mx.clearRect(0,0,W,H);mx.filter=`blur(${blur}px)`;mx.fillStyle='#fff';
+      poly(mx,ov.map(p=>[cxm+(p[0]-cxm)*.96,cym+(p[1]-cym)*.96]));
+      if(dist(dp[13],dp[14])/dist(dp[10],dp[152])>.03){
+        mx.globalCompositeOperation='destination-out';poly(mx,MOUTH.map(i=>dp[i]));mx.globalCompositeOperation='source-over';
+      }
+      mx.filter='none';
+      wx.globalCompositeOperation='destination-in';wx.drawImage(mc,0,0);wx.globalCompositeOperation='source-over';
+      // 3. Khớp màu da rồi dán lên frame
+      const pad=Math.ceil(blur*2)+2;
+      const bx=Math.max(0,Math.floor(Math.min(...xs))-pad),by=Math.max(0,Math.floor(Math.min(...ys))-pad);
+      const bw=Math.min(W,Math.ceil(Math.max(...xs))+pad)-bx,bh=Math.min(H,Math.ceil(Math.max(...ys))+pad)-by;
+      if(bw>4&&bh>4&&strength()>0)colorMatch(bx,by,bw,bh,fw);
+      cx.drawImage(wl,0,0);
+    }
+
+    function frame(){
+      cx.drawImage(v,0,0,W,H);
+      dx.drawImage(v,0,0,dc.width,dc.height);
+      lastTs=Math.max(lastTs+1,performance.now());
+      const r=lm.detectForVideo(dc,lastTs);
+      if(!r.faceLandmarks.length){prev=null;return}
+      const cur=r.faceLandmarks[0].slice(0,468).map(p=>[p.x*W,p.y*H]);
+      if(prev){
+        const fw=dist(cur[454],cur[234])||1,mv=cur.reduce((t,p,i)=>t+dist(p,prev[i]),0)/cur.length/fw,a=Math.min(1,.3+mv*25);
+        prev=cur.map((p,i)=>[prev[i][0]+(p[0]-prev[i][0])*a,prev[i][1]+(p[1]-prev[i][1])*a]);
+      }else prev=cur;
+      swap(prev);
+    }
+
+    const finish=()=>{if(done)return;done=true;setTimeout(()=>rec.stop(),400)};
+    const tick=()=>{
+      if(done)return;
+      frame();$('bar').style.width=(v.currentTime/v.duration*100)+'%';
+      if(!v.ended)schedule();
+    };
+    const schedule=()=>v.requestVideoFrameCallback?v.requestVideoFrameCallback(tick):requestAnimationFrame(tick);
+
+    rec.onstop=()=>{
+      const type=(mime||'video/webm').split(';')[0];
+      const u=URL.createObjectURL(new Blob(chunks,{type}));
+      $('rv').src=u;$('dl').href=u;$('dl').download='face-swap.'+(type.includes('mp4')?'mp4':'webm');
+      $('out').hidden=false;$('bar').style.width='100%';ac.close();
+      busy=false;update();status("Xong! Xem lại và tải video bên dưới.","ok");
+    };
+    v.onended=finish;
+    status("Đang đổi mặt… giữ tab này ở phía trước đến khi xong.");
+    rec.start(500);await v.play();schedule();
+  }catch(err){
+    console.error(err);if(ac)ac.close();
+    busy=false;update();status("Có lỗi khi xử lý video. Thử file khác hoặc chọn độ phân giải thấp hơn.","err");
+  }
+};
+</script>
+</body>
+</html>
