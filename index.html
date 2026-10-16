@@ -43,14 +43,8 @@ footer{margin-top:40px;color:var(--mute);font-size:13px}
 <p class="sub">Chọn video, chọn ảnh mặt rồi bấm đổi. Toàn bộ xử lý diễn ra trong trình duyệt của bạn, video và ảnh không bị tải lên đâu cả.</p>
 
 <section class="grid">
-  <label class="drop" id="dv"><input type="file" id="fv" accept="video/*" hidden><video id="pv" muted playsinline preload="metadata"></video><b>Chọn video</b><small>MP4, MOV, WebM – nên dưới 60 giây</small></label>
+  <label class="drop" id="dv"><input type="file" id="fv" accept=".mp4,.mov,.m4v,video/mp4,video/quicktime" hidden><video id="pv" muted playsinline preload="metadata"></video><b>Chọn video</b><small>MP4 hoặc MOV – giữ nguyên FPS, độ phân giải, âm thanh</small></label>
   <label class="drop" id="di"><input type="file" id="fi" accept="image/*" hidden><img id="pi" alt="Ảnh mặt đã chọn"><b>Chọn ảnh mặt</b><small>Chụp rõ mặt, nhìn thẳng</small></label>
-</section>
-
-<section class="opts">
-  <label>Độ phân giải đầu ra
-    <select id="res"><option value="720">720p – nhanh</option><option value="1080">1080p</option><option value="0" selected>Giữ nguyên gốc</option></select>
-  </label>
 </section>
 
 <button id="go" disabled>Đổi mặt</button>
@@ -63,10 +57,12 @@ footer{margin-top:40px;color:var(--mute);font-size:13px}
   <a id="dl" class="btn">Tải video</a>
 </section>
 
-<footer>Dùng Chrome hoặc Edge trên máy tính để có kết quả tốt nhất. Giữ tab ở phía trước trong lúc xử lý. Chỉ dùng ảnh của người đã đồng ý.</footer>
+<footer>Dùng Chrome hoặc Edge trên máy tính để có kết quả tốt nhất. Mỗi frame của video được xử lý đầy đủ nên video dài sẽ mất thời gian hơn thời lượng của nó. Chỉ dùng ảnh của người đã đồng ý.</footer>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/delaunator@5.0.1/delaunator.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js"></script>
 <script type="module">
 import {FaceLandmarker,FilesetResolver,ImageSegmenter} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
@@ -104,7 +100,7 @@ $('fi').onchange=async e=>{
   $('pi').src=URL.createObjectURL(f);$('di').classList.add('has');$('di').querySelector('b').textContent='Ảnh mặt';
   await ready;if(!lm)return;
   const bmp=await createImageBitmap(f,{imageOrientation:'from-image'});
-  const k=Math.min(1,2048/Math.max(bmp.width,bmp.height));
+  const k=Math.min(1,4096/Math.max(bmp.width,bmp.height));
   srcC=document.createElement('canvas');srcC.width=Math.round(bmp.width*k);srcC.height=Math.round(bmp.height*k);
   srcC.getContext('2d').drawImage(bmp,0,0,srcC.width,srcC.height);
   await lm.setOptions({runningMode:'IMAGE'});
@@ -135,28 +131,53 @@ function poly(c,pts){c.beginPath();pts.forEach((p,i)=>i?c.lineTo(p[0],p[1]):c.mo
 // ---------- Xử lý video ----------
 $('go').onclick=async()=>{
   busy=true;update();$('out').hidden=true;$('bar').style.width='0';
-  let ac;
+  let dec,enc;
   try{
-    const v=document.createElement('video');v.playsInline=true;v.src=URL.createObjectURL(videoFile);
-    await new Promise((ok,no)=>{v.onloadedmetadata=ok;v.onerror=no});
-    let W=v.videoWidth,H=v.videoHeight;const lim=+$('res').value;
-    if(lim){const k=Math.min(1,lim/Math.min(W,H));W*=k;H*=k}
-    W=Math.round(W/2)*2;H=Math.round(H/2)*2;
+    // ===== 1. Đọc metadata video gốc: FPS, số frame, thời lượng, kích thước, codec, xoay, âm thanh =====
+    const buf=await videoFile.arrayBuffer();buf.fileStart=0;
+    const mp4=MP4Box.createFile();
+    const info=await new Promise((ok,no)=>{mp4.onReady=ok;mp4.onError=e=>no(new Error('Không đọc được cấu trúc MP4/MOV'));mp4.appendBuffer(buf);mp4.flush()});
+    const vt=info.videoTracks[0],at=info.audioTracks[0];
+    if(!vt)throw new Error('Không tìm thấy track video');
+    const vs=[],as=[];
+    mp4.onSamples=(id,u,ss)=>{for(const x of ss)(id===vt.id?vs:as).push(x)};
+    mp4.setExtractionOptions(vt.id,null,{nbSamples:1e9});if(at)mp4.setExtractionOptions(at.id,null,{nbSamples:1e9});
+    mp4.start();mp4.flush();
+    for(let t=0;t<50&&vs.length<vt.nb_samples;t++)await new Promise(r=>setTimeout(r,60));
+    if(vs.length<vt.nb_samples)throw new Error('Thiếu frame khi đọc video');
+    const fps=vt.nb_samples/(vt.duration/vt.timescale),mt=vt.matrix||[65536,0,0,0,65536,0,0,0,1073741824];
+    const rot=((Math.round(Math.atan2(mt[1],mt[0])*180/Math.PI)%360)+360)%360,w0=vt.video.width,h0=vt.video.height,sw=rot===90||rot===270;
+    const W=((sw?h0:w0)+1)&~1,H=((sw?w0:h0)+1)&~1,tsStep=1000/fps;
+    const ent=mp4.getTrackById(vt.id).mdia.minf.stbl.stsd.entries[0],cfgBox=ent.avcC||ent.hvcC||ent.vpcC||ent.av1C;
+    let desc;if(cfgBox){const ds=new DataStream(undefined,0,DataStream.BIG_ENDIAN);cfgBox.write(ds);desc=new Uint8Array(ds.buffer,8)}
+    const dcfg={codec:vt.codec,codedWidth:w0,codedHeight:h0,description:desc};
+    if(!(await VideoDecoder.isConfigSupported(dcfg)).supported)throw new Error('Trình duyệt không giải mã được codec '+vt.codec);
+    // bitrate theo video gốc và độ phân giải, không đặt thấp để giữ chi tiết khuôn mặt
+    const bitrate=Math.round(Math.min(1e8,Math.max(8e6,(vt.bitrate||0)*1.3,W*H*fps*.15)));
+    let eC;for(const c of ['avc1.640034','avc1.64002a','avc1.640028','avc1.4d0028'])if((await VideoEncoder.isConfigSupported({codec:c,width:W,height:H,bitrate,framerate:fps})).supported){eC=c;break}
+    if(!eC)throw new Error('Trình duyệt không mã hóa được H.264 ở độ phân giải này');
+    // âm thanh AAC được chép nguyên bản (không giải mã/mã hóa lại)
+    const aac=at&&/^mp4a\.40/.test(at.codec);let asc;
+    if(aac){try{asc=new Uint8Array(mp4.getTrackById(at.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data)}catch(e){
+      const F=[96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000,7350],x=(2<<11)|(F.indexOf(at.audio.sample_rate)<<7)|(at.audio.channel_count<<3);asc=new Uint8Array([x>>8,x&255])}}
+    const mux=new Mp4Muxer.Muxer({target:new Mp4Muxer.ArrayBufferTarget(),video:{codec:'avc',width:W,height:H,frameRate:fps},
+      ...(aac?{audio:{codec:'aac',numberOfChannels:at.audio.channel_count,sampleRate:at.audio.sample_rate}}:{}),fastStart:'in-memory',firstTimestampBehavior:'offset'});
 
     const cv=$('cv');cv.hidden=false;cv.width=W;cv.height=H;
     const cx=cv.getContext('2d');
     const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
     const wl=mk(W,H),wx=wl.getContext('2d'),mc=mk(W,H),mx=mc.getContext('2d');
-    wx.imageSmoothingQuality='high';
-    const dk=Math.min(1,960/Math.max(W,H)),dc=mk(Math.round(W*dk),Math.round(H*dk)),dx=dc.getContext('2d');
+    wx.imageSmoothingQuality='high';cx.imageSmoothingQuality='high';
+    const dk=Math.min(1,1920/Math.max(W,H)),dc=mk(Math.round(W*dk),Math.round(H*dk)),dx=dc.getContext('2d');
     await lm.setOptions({runningMode:'VIDEO'});
-
-    ac=new AudioContext();await ac.resume();
-    const ad=ac.createMediaStreamDestination();ac.createMediaElementSource(v).connect(ad);
-    const stream=cv.captureStream(30);ad.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
-    const mime=['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm'].find(m=>MediaRecorder.isTypeSupported(m))||'';
-    const rec=new MediaRecorder(stream,{mimeType:mime||undefined,videoBitsPerSecond:Math.min(4e7,Math.max(6e6,W*H*4.5))});
-    const chunks=[];rec.ondataavailable=e=>e.data.size&&chunks.push(e.data);
+    // vẽ frame đã giải mã lên canvas theo đúng chiều xoay của video gốc
+    const drawSrc=f=>{
+      if(rot===90)cx.setTransform(0,1,-1,0,W,0);else if(rot===180)cx.setTransform(-1,0,0,-1,W,H);else if(rot===270)cx.setTransform(0,-1,1,0,0,H);
+      cx.drawImage(f,0,0,f.displayWidth,f.displayHeight);cx.setTransform(1,0,0,1,0,0);
+    };
+    // độ nét (năng lượng Laplacian, kênh xanh) dùng để chỉ làm mềm ảnh nguồn khi video thật sự mềm hơn
+    const lap=(d,w,h)=>{let s=0,n=0;for(let y=1;y<h-1;y+=2)for(let x=1;x<w-1;x+=2){const i=(y*w+x)*4+1;s+=Math.abs(4*d[i]-d[i-4]-d[i+4]-d[i-w*4]-d[i+w*4]);n++}return s/n};
+    const bl={r:0};
 
     let prev=null,done=false,spd=0;
 
@@ -194,7 +215,7 @@ $('go').onclick=async()=>{
     const HOLES=[[33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246],[263,249,390,373,374,380,381,382,362,398,384,385,386,387,388,466],
       [70,63,105,66,107,55,65,52,53,46],[300,293,334,296,336,285,295,282,283,276],[61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185]];
     const KM=mk(GN,GN),st={d:null,gl:1,gc:1,m:null};
-    function colorMatch(bx,by,bw,bh,fw,dp){
+    function colorMatch(bx,by,bw,bh,fw,dp,kS){
       const sx=GN/bw,sy=GN/bh,X={};
       for(const [n,c] of Object.entries({sm,tm,KM})){c.width=GN;c.height=GN;X[n]=c.getContext('2d',{willReadFrequently:true});X[n].imageSmoothingQuality='high'}
       X.sm.drawImage(wl,bx,by,bw,bh,0,0,GN,GN);X.tm.drawImage(cv,bx,by,bw,bh,0,0,GN,GN);
@@ -240,12 +261,13 @@ $('go').onclick=async()=>{
       for(let i=0;i<N;i++){G.data[i*4]=127.5+cl(d[i*3],-60,60)*2.125;G.data[i*4+1]=127.5+cl(d[i*3+1],-40,40)*3.1875;G.data[i*4+2]=127.5+cl(d[i*3+2],-40,40)*3.1875;G.data[i*4+3]=255}
       gx.putImageData(G,0,0);
       up.width=bw;up.height=bh;const ux=up.getContext('2d',{willReadFrequently:true});ux.imageSmoothingQuality='high';ux.drawImage(gc,0,0,bw,bh);
-      const U=ux.getImageData(0,0,bw,bh).data,F=wx.getImageData(bx,by,bw,bh),f=F.data,q=[0,0,0],r=[0,0,0],M=st.m;
+      mb.width=bw;mb.height=bh;const bq=mb.getContext('2d',{willReadFrequently:true});bq.filter=`blur(${Math.max(.8,fw*.004)}px)`;bq.drawImage(wl,bx,by,bw,bh,0,0,bw,bh);
+      const Bd=bq.getImageData(0,0,bw,bh).data,U=ux.getImageData(0,0,bw,bh).data,F=wx.getImageData(bx,by,bw,bh),f=F.data,q=[0,0,0],r=[0,0,0],M=st.m;
       for(let i=0;i<f.length;i+=4){
         if(!f[i+3])continue;
-        lab(f[i],f[i+1],f[i+2],q);
+        const o0=f[i],o1=f[i+1],o2=f[i+2];lab(o0,o1,o2,q);
         rgb(M[0]+(q[0]+(U[i]-127.5)/2.125-M[0])*st.gl,M[1]+(q[1]+(U[i+1]-127.5)/3.1875-M[1])*st.gc,M[2]+(q[2]+(U[i+2]-127.5)/3.1875-M[2])*st.gc,r);
-        f[i]=r[0];f[i+1]=r[1];f[i+2]=r[2];
+        f[i]=r[0]+kS*cl(o0-Bd[i],-18,18);f[i+1]=r[1]+kS*cl(o1-Bd[i+1],-18,18);f[i+2]=r[2]+kS*cl(o2-Bd[i+2],-18,18); // chi tiết nhẹ, giới hạn biên độ để không tạo halo
       }
       wx.putImageData(F,bx,by);
     }
@@ -270,11 +292,13 @@ $('go').onclick=async()=>{
       }
       // 2. Biên mặt tự thích nghi: độ mềm suy ra từ kích thước mặt và tốc độ chuyển động; hàm/cằm nhọn, má vừa, trán mềm hơn (chuyển sang tóc)
       const xs=dp.map(p=>p[0]),ys=dp.map(p=>p[1]),fw=Math.max(...xs)-Math.min(...xs),fh=dist(dp[10],dp[152]);
-      const mr=Math.min(10,Math.max(0,(spd*.5-1.5)*.45)),s0=Math.max(.8,fw*.008)+mr*.5,pad=Math.ceil(s0*6)+4;
+      const s0=Math.max(.8,fw*.008),pad=Math.ceil(s0*6)+4,upr=fw0/(srcFW*lv.k),kS=upr>1?Math.min(.7,.3+.3*(upr-1)):.25;
       const bx=Math.max(0,Math.floor(Math.min(...xs))-pad),by=Math.max(0,Math.floor(Math.min(...ys))-pad);
       const bw=Math.min(W,Math.ceil(Math.max(...xs))+pad)-bx,bh=Math.min(H,Math.ceil(Math.max(...ys))+pad)-by;
       if(bw<8||bh<8)return;
-      if(mr>.4){mb.width=bw;mb.height=bh;const q=mb.getContext('2d');q.filter=`blur(${mr}px)`;q.drawImage(wl,bx,by,bw,bh,0,0,bw,bh);wx.clearRect(bx,by,bw,bh);wx.drawImage(mb,bx,by)}
+      {const cw=Math.min(bw,160),ch=Math.min(bh,160),x0=bx+((bw-cw)>>1),y0=by+((bh-ch)>>1),A=wx.getImageData(x0,y0,cw,ch).data,B=cx.getImageData(x0,y0,cw,ch).data;
+       const rt=lap(B,cw,ch)/Math.max(lap(A,cw,ch),1e-3);bl.r=bl.r*.6+(rt<.7?cl((1/rt-1)*1.2,0,2.5):0)*.4;
+       if(bl.r>.4){mb.width=bw;mb.height=bh;const q=mb.getContext('2d');q.filter=`blur(${bl.r}px)`;q.drawImage(wl,bx,by,bw,bh,0,0,bw,bh);wx.clearRect(bx,by,bw,bh);wx.drawImage(mb,bx,by)}}
       const ov=OVAL.map(i=>dp[i]),cxm=ov.reduce((t,p)=>t+p[0],0)/ov.length,cym=ov.reduce((t,p)=>t+p[1],0)/ov.length;
       const yw=(dist(dp[1],dp[234])-dist(dp[1],dp[454]))/(dist(dp[234],dp[454])||1);
       const pts=ov.map(p=>{const t=(p[1]-cym)/(fh/2);let f=t>.5?.965:t<-.6?.95:.97;if(yw>.12?p[0]<cxm:yw<-.12&&p[0]>cxm)f-=Math.min(.1,Math.abs(yw)*.25);return [cxm+(p[0]-cxm)*f,cym+(p[1]-cym)*f]});
@@ -288,14 +312,14 @@ $('go').onclick=async()=>{
       mx.filter='none';
       wx.setTransform(1,0,0,1,0,0);wx.globalCompositeOperation='destination-in';wx.drawImage(mc,0,0);wx.globalCompositeOperation='source-over';
       // 3. Khớp màu da + ánh sáng tự động rồi dán lên frame
-      colorMatch(bx,by,bw,bh,fw,dp);
+      colorMatch(bx,by,bw,bh,fw,dp,kS);
       cx.drawImage(wl,0,0);
     }
 
-    function frame(){
-      cx.drawImage(v,0,0,W,H);
-      dx.drawImage(v,0,0,dc.width,dc.height);
-      lastTs=Math.max(lastTs+1,performance.now());
+    function frame(f){
+      drawSrc(f);
+      dx.drawImage(cv,0,0,dc.width,dc.height);
+      lastTs+=tsStep;
       const r=lm.detectForVideo(dc,lastTs);
       if(!r.faceLandmarks.length){prev=null;return}
       let occ=null;
@@ -310,27 +334,39 @@ $('go').onclick=async()=>{
       swap(prev,occ);
     }
 
-    const finish=()=>{if(done)return;done=true;setTimeout(()=>rec.stop(),400)};
-    const tick=()=>{
-      if(done)return;
-      frame();$('bar').style.width=(v.currentTime/v.duration*100)+'%';
-      if(!v.ended)schedule();
-    };
-    const schedule=()=>v.requestVideoFrameCallback?v.requestVideoFrameCallback(tick):requestAnimationFrame(tick);
-
-    rec.onstop=()=>{
-      const type=(mime||'video/webm').split(';')[0];
-      const u=URL.createObjectURL(new Blob(chunks,{type}));
-      $('rv').src=u;$('dl').href=u;$('dl').download='face-swap.'+(type.includes('mp4')?'mp4':'webm');
-      $('out').hidden=false;$('bar').style.width='100%';ac.close();
-      busy=false;update();status("Xong! Xem lại và tải video bên dưới.","ok");
-    };
-    v.onended=finish;
-    status("Đang đổi mặt… giữ tab này ở phía trước đến khi xong.");
-    rec.start(500);await v.play();schedule();
+    // ===== 2. Giải mã MỌI frame -> xử lý -> mã hóa với đúng timestamp gốc (tốc độ xử lý không ảnh hưởng FPS đầu ra) =====
+    const total=vs.length,us=(x,t)=>Math.round(x*1e6/t),yieldNow=()=>new Promise(r=>{const c=new MessageChannel();c.port1.onmessage=()=>r();c.port2.postMessage(0)});
+    const q=[];let dErr=null,fed=0,flushed=false,fl=false,nIn=0,nOut=0,ai=0;
+    dec=new VideoDecoder({output:f=>q.push(f),error:e=>dErr=e});dec.configure(dcfg);
+    enc=new VideoEncoder({output:(c,m)=>{mux.addVideoChunk(c,m);nOut++},error:e=>dErr=e});
+    enc.configure({codec:eC,width:W,height:H,bitrate,framerate:fps,latencyMode:'quality'});
+    const addAudio=lim=>{while(aac&&ai<as.length&&us(as[ai].cts,as[ai].timescale)<=lim){
+      const s=as[ai],o=ai++===0?{decoderConfig:{codec:'mp4a.40.2',numberOfChannels:at.audio.channel_count,sampleRate:at.audio.sample_rate,description:asc}}:undefined;
+      mux.addAudioChunkRaw(s.data,s.is_sync?'key':'delta',us(s.cts,s.timescale),us(s.duration,s.timescale),o)}};
+    const gop=Math.max(1,Math.round(fps*2)),t0=Date.now(),dur=vt.duration/vt.timescale;
+    status(`Video gốc: ${W}×${H}, ${fps.toFixed(3)} FPS, ${total} frame, ${dur.toFixed(2)}s, ${vt.codec}, ${aac?'âm thanh AAC (giữ nguyên)':at?'âm thanh không phải AAC (sẽ bị bỏ)':'không có âm thanh'}`);
+    while(nIn<total){
+      if(dErr)throw dErr;
+      while(fed<total&&dec.decodeQueueSize<16&&q.length<12){const s=vs[fed++];dec.decode(new EncodedVideoChunk({type:s.is_sync?'key':'delta',timestamp:us(s.cts,s.timescale),duration:us(s.duration,s.timescale),data:s.data}))}
+      if(fed>=total&&!flushed){flushed=true;dec.flush().then(()=>fl=true,e=>dErr=e)}
+      const f=q.shift();
+      if(!f){if(fl)break;await yieldNow();continue}
+      const ts=f.timestamp,fd=f.duration;
+      frame(f);
+      const o=new VideoFrame(cv,{timestamp:ts,duration:fd||undefined});
+      enc.encode(o,{keyFrame:nIn%gop===0});o.close();f.close();nIn++;
+      addAudio(ts+1e6);
+      while(enc.encodeQueueSize>6)await yieldNow();
+      if(nIn%5===0){$('bar').style.width=(nIn/total*100)+'%';$('st').textContent=`Đang xử lý ${nIn}/${total} frame (${(nIn/((Date.now()-t0)/1000)).toFixed(1)} frame/giây) – video vẫn xuất ${fps.toFixed(3)} FPS`;await yieldNow()}
+    }
+    await enc.flush();addAudio(Infinity);mux.finalize();
+    const u=URL.createObjectURL(new Blob([mux.target.buffer],{type:'video/mp4'}));
+    $('rv').src=u;$('dl').href=u;$('dl').download='face-swap.mp4';$('out').hidden=false;$('bar').style.width='100%';
+    dec.close();enc.close();busy=false;update();
+    status(`Xong: ${nOut}/${total} frame, ${fps.toFixed(3)} FPS, ${W}×${H}, ${dur.toFixed(2)}s${aac?', âm thanh gốc':''} – mất ${((Date.now()-t0)/1000).toFixed(0)} giây.`,nOut===total?'ok':'err');
   }catch(err){
-    console.error(err);if(ac)ac.close();
-    busy=false;update();status("Có lỗi khi xử lý video. Thử file khác hoặc chọn độ phân giải thấp hơn.","err");
+    console.error(err);try{dec&&dec.close();enc&&enc.close()}catch(e){}
+    busy=false;update();status("Không xử lý được video: "+(err&&err.message||err)+". Cần file MP4/MOV (H.264 hoặc HEVC) và Chrome/Edge bản mới.","err");
   }
 };
 </script>
